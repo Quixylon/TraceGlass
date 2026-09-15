@@ -1,0 +1,78 @@
+name: TraceGlass device build
+on:
+  push:
+    branches: [traceglass, main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: traceglass-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select installed Xcode 26 or later
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_ENV"
+          from pathlib import Path
+          import re
+          apps=[]
+          for path in Path('/Applications').glob('Xcode*.app'):
+              nums=tuple(map(int,re.findall(r'\d+',path.name)))
+              if nums and nums[0]>=26: apps.append((nums,path))
+          if apps: print('DEVELOPER_DIR='+str(max(apps)[1]/'Contents/Developer'))
+          PY
+      - name: SDK details
+        run: xcodebuild -version && xcodebuild -showsdks
+      - name: Release for physical iPhone
+        run: bash scripts/build_ipa.sh
+      - name: Unit and UI tests
+        run: bash scripts/test_ios.sh
+      - name: Save IPA, tests and build evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TraceGlass-device
+          path: artifacts/
+          retention-days: 30
+          if-no-files-found: error
+  publish:
+    needs: release
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && github.repository == 'Quixylon/TraceGlass'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: TraceGlass-device
+          path: artifacts
+      - name: Validate and prepare release files
+        run: python3 scripts/prepare_release.py
+      - name: Publish free IPA and source release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(cat VERSION)"
+          tag="v${version}"
+          if gh release view "$tag" --json isDraft > release-state.json 2>/dev/null; then
+            if python3 -c 'import json,sys; sys.exit(0 if json.load(open("release-state.json"))["isDraft"] else 1)'; then
+              echo 'A draft with this version already exists. Inspect it before retrying; nothing was overwritten.' >&2
+              exit 1
+            fi
+            echo "Release $tag already exists; keeping its files unchanged. Bump VERSION for another release."
+            exit 0
+          fi
+          gh release create "$tag" dist/*.ipa dist/*.zip dist/SHA256SUMS.txt \
+            --target "$GITHUB_SHA" --title "TraceGlass $tag — Free iPhone tracing" \
+            --notes-file "docs/releases/$tag.md" --draft
+          gh release edit "$tag" --draft=false --latest

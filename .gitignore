@@ -1,0 +1,8 @@
+build/
+artifacts/
+.DS_Store
+xcuserdata/
+*.xcuserstate
+__pycache__/
+dist/
+release-state.json
